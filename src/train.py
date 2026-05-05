@@ -1,156 +1,206 @@
 """
 train.py
-========
-Entrenamiento, re-entrenamiento y carga del modelo de detección de cáncer.
+────────
+Entrenamiento y re-entrenamiento del modelo de detección de cáncer.
 
-Flujo:
-  - Si config.model.retrain = true  → entrena/re-entrena y guarda
-  - Si config.model.retrain = false → carga modelo existente del disco
-  - Cross-validation (k-fold estratificado)
-  - Test final sobre el conjunto holdout
-  - Registra fechas de inicio/fin del entrenamiento
+Características:
+  - Soporte para RandomForest, LogisticRegression, SVM, GradientBoosting
+  - Cross-Validation (StratifiedKFold) con métricas por fold
+  - Registro de tiempo de inicio/fin (datetime)
+  - Guardado local del modelo con joblib
+  - Integración con MLFlow (parámetros, métricas de CV)
+
+Uso:
+    python src/train.py
+    python src/train.py --retrain   # fuerza reentrenamiento
 """
 
 import os
-import joblib
+import logging
+import argparse
 import datetime
-import numpy as np
 import yaml
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.svm import SVC
+import joblib
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.pipeline import Pipeline as SklearnPipeline
+import mlflow
+import mlflow.sklearn
+from mlflow.models.signature import infer_signature
 
+log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────
+MODEL_REGISTRY = {
+    "RandomForest": RandomForestClassifier,
+    "LogisticRegression": LogisticRegression,
+    "SVM": SVC,
+    "GradientBoosting": GradientBoostingClassifier,
+}
+
 
 def load_config(config_path: str = "config.yaml") -> dict:
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-# ─────────────────────────────────────────────
-# Construcción del estimador
-# ─────────────────────────────────────────────
-
-def build_estimator(cfg: dict):
-    """Devuelve el clasificador configurado en config.yaml."""
-    algorithm = cfg["model"]["algorithm"]
-    hp = cfg["model"]["hyperparameters"].get(algorithm, {})
-
-    if algorithm == "random_forest":
-        return RandomForestClassifier(**hp)
-    elif algorithm == "svm":
-        return SVC(probability=True, **hp)
-    elif algorithm == "logistic_regression":
-        return LogisticRegression(**hp)
-    else:
-        raise ValueError(f"[ERROR] Algoritmo desconocido: '{algorithm}'")
+def build_model(model_name: str, params: dict):
+    """Instancia el modelo configurado."""
+    if model_name not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Modelo '{model_name}' no soportado. "
+            f"Opciones: {list(MODEL_REGISTRY)}"
+        )
+    ModelClass = MODEL_REGISTRY[model_name]
+    # SVM necesita probability=True para ROC
+    if model_name == "SVM":
+        params = {**params, "probability": True}
+    return ModelClass(**params)
 
 
-# ─────────────────────────────────────────────
-# Cross-Validation
-# ─────────────────────────────────────────────
+def cross_validate_model(model, X_train, y_train, folds: int = 5) -> dict:
+    """
+    Realiza StratifiedKFold cross-validation.
+    Retorna métricas promedio y por fold.
+    """
+    log.info("Cross-validation — %d folds …", folds)
+    cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
 
-def run_cross_validation(estimator, X_train, y_train, cfg: dict) -> dict:
-    cv_cfg = cfg["model"]["cross_validation"]
-    if not cv_cfg.get("enabled", True):
-        return {}
+    scoring = {
+        "accuracy": "accuracy",
+        "precision": "precision_weighted",
+        "recall": "recall_weighted",
+        "f1": "f1_weighted",
+        "roc_auc": "roc_auc",
+    }
 
-    folds = cv_cfg.get("folds", 5)
-    scoring = cv_cfg.get("scoring", "f1")
-
-    print(f"\n[CV] Ejecutando {folds}-Fold Cross-Validation (scoring={scoring}) …")
-    skf = StratifiedKFold(n_splits=folds, shuffle=True,
-                          random_state=cfg["dataset"]["random_state"])
-
-    cv_results = cross_validate(
-        estimator, X_train, y_train,
-        cv=skf,
-        scoring=["accuracy", "f1", "precision", "recall", "roc_auc"],
+    results = cross_validate(
+        model, X_train, y_train,
+        cv=cv,
+        scoring=scoring,
         return_train_score=True,
         n_jobs=-1,
     )
 
     summary = {}
-    for metric in ["test_accuracy", "test_f1", "test_precision",
-                   "test_recall", "test_roc_auc"]:
-        vals = cv_results[metric]
-        clean_key = metric.replace("test_", "cv_")
-        summary[f"{clean_key}_mean"] = float(np.mean(vals))
-        summary[f"{clean_key}_std"]  = float(np.std(vals))
-        print(f"  {clean_key:<22} {np.mean(vals):.4f} ± {np.std(vals):.4f}")
+    for metric in scoring:
+        vals = results[f"test_{metric}"]
+        summary[metric] = {
+            "mean": float(np.mean(vals)),
+            "std":  float(np.std(vals)),
+            "per_fold": vals.tolist(),
+        }
+        log.info("CV %s — mean: %.4f ± %.4f", metric,
+                 summary[metric]["mean"], summary[metric]["std"])
 
     return summary
 
 
-# ─────────────────────────────────────────────
-# Entrenamiento
-# ─────────────────────────────────────────────
-
-def train_model(X_train, y_train, config_path: str = "config.yaml"):
+def train(X_train, y_train, config_path: str = "config.yaml",
+          force_retrain: bool = False) -> tuple:
     """
-    Entrena el modelo y retorna:
-        model, cv_metrics, train_start, train_end
+    Entrena o re-entrena el modelo.
+    Retorna (model, cv_summary, run_info).
     """
     cfg = load_config(config_path)
+    model_cfg  = cfg["model"]
+    mlflow_cfg = cfg["mlflow"]
+    paths_cfg  = cfg["paths"]
 
-    # ── Retrain=False → cargar modelo existente ──
-    if not cfg["model"].get("retrain", True):
-        model_path = cfg["model"]["saved_model_path"]
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"[ERROR] retrain=false pero no existe {model_path}"
-            )
-        print(f"\n[TRAIN] Cargando modelo desde {model_path} …")
-        model = joblib.load(model_path)
-        return model, {}, None, None
+    retrain = force_retrain or model_cfg.get("retrain", True)
+    model_path = os.path.join(
+        paths_cfg["models_dir"],
+        f"{model_cfg['name']}_model.pkl"
+    )
 
-    # ── Retrain=True → entrenar ──
-    estimator = build_estimator(cfg)
-    print(f"\n[TRAIN] Algoritmo seleccionado: {cfg['model']['algorithm'].upper()}")
+    # ── Registro de tiempos ───────────────────────────────────────────────────
+    start_dt = datetime.datetime.now()
+    log.info("╔══ ENTRENAMIENTO INICIADO ══ %s", start_dt.isoformat())
 
-    # Cross-validation ANTES del fit final
-    cv_metrics = run_cross_validation(estimator, X_train, y_train, cfg)
+    # ── Configurar MLFlow ─────────────────────────────────────────────────────
+    mlflow.set_tracking_uri(mlflow_cfg["tracking_uri"])
+    mlflow.set_experiment(mlflow_cfg["experiment_name"])
 
-    # Registro de tiempo
-    train_start = datetime.datetime.now()
-    print(f"\n[TRAIN] Inicio entrenamiento: {train_start.isoformat()}")
+    with mlflow.start_run(run_name=mlflow_cfg["run_name"]) as run:
+        run_id = run.info.run_id
+        log.info("MLFlow Run ID: %s", run_id)
 
-    # Entrenamiento completo sobre todo X_train
-    estimator.fit(X_train, y_train)
+        # Loguear parámetros del modelo y configuración
+        mlflow.log_params({
+            "model_name":   model_cfg["name"],
+            "retrain":      retrain,
+            "cv_folds":     model_cfg["cross_val_folds"],
+            "test_size":    cfg["data"]["test_size"],
+            "random_state": cfg["data"]["random_state"],
+            "scaler":       cfg["preprocessing"]["scaler"],
+            **{f"param_{k}": v for k, v in model_cfg["params"].items()},
+        })
 
-    train_end = datetime.datetime.now()
-    duration = (train_end - train_start).total_seconds()
-    print(f"[TRAIN] Fin entrenamiento   : {train_end.isoformat()}")
-    print(f"[TRAIN] Duración            : {duration:.2f} s")
+        # ── Construir modelo ──────────────────────────────────────────────────
+        model = build_model(model_cfg["name"], model_cfg["params"])
 
-    # Guardar modelo en disco
-    os.makedirs(cfg["output"]["models_dir"], exist_ok=True)
-    model_path = cfg["model"]["saved_model_path"]
-    joblib.dump(estimator, model_path)
-    print(f"[TRAIN] Modelo guardado en  : {model_path}")
+        # ── Cross-Validation ──────────────────────────────────────────────────
+        cv_summary = cross_validate_model(
+            model, X_train, y_train, folds=model_cfg["cross_val_folds"]
+        )
 
-    return estimator, cv_metrics, train_start, train_end
+        # Loguear métricas de CV en MLFlow
+        for metric, vals in cv_summary.items():
+            mlflow.log_metric(f"cv_{metric}_mean", vals["mean"])
+            mlflow.log_metric(f"cv_{metric}_std",  vals["std"])
+            for i, v in enumerate(vals["per_fold"]):
+                mlflow.log_metric(f"cv_{metric}_fold_{i+1}", v)
+
+        # ── Entrenar en datos completos ───────────────────────────────────────
+        if retrain or not os.path.exists(model_path):
+            log.info("Entrenando modelo %s …", model_cfg["name"])
+            model.fit(X_train, y_train)
+            os.makedirs(paths_cfg["models_dir"], exist_ok=True)
+            joblib.dump(model, model_path)
+            log.info("Modelo guardado en: %s", model_path)
+            mlflow.log_param("model_action", "trained")
+        else:
+            log.info("Cargando modelo existente: %s", model_path)
+            model = joblib.load(model_path)
+            mlflow.log_param("model_action", "loaded")
+
+        # ── Tiempo de fin ─────────────────────────────────────────────────────
+        end_dt = datetime.datetime.now()
+        duration = (end_dt - start_dt).total_seconds()
+        log.info("╚══ ENTRENAMIENTO FINALIZADO ══ %s (%.2f s)", end_dt.isoformat(), duration)
+
+        mlflow.log_params({
+            "training_start": start_dt.isoformat(),
+            "training_end":   end_dt.isoformat(),
+            "training_duration_sec": round(duration, 2),
+        })
+
+        # ── Registrar modelo (firma) en MLFlow ────────────────────────────────
+        signature = infer_signature(X_train, model.predict(X_train))
+        mlflow.sklearn.log_model(
+            sk_model       = model,
+            artifact_path  = mlflow_cfg["artifact_path"],
+            signature      = signature,
+            registered_model_name = model_cfg["registered_model_name"],
+        )
+
+        run_info = {
+            "run_id":   run_id,
+            "start_dt": start_dt.isoformat(),
+            "end_dt":   end_dt.isoformat(),
+            "duration": duration,
+            "model_path": model_path,
+        }
+
+    return model, cv_summary, run_info
 
 
-# ─────────────────────────────────────────────
-# Predicción / Test
-# ─────────────────────────────────────────────
-
-def predict(model, X_test):
-    """
-    Retorna:
-        y_pred         → etiquetas predichas
-        y_pred_proba   → probabilidades (clase positiva)
-    """
-    y_pred = model.predict(X_test)
-    try:
-        y_pred_proba = model.predict_proba(X_test)[:, 1]
-    except AttributeError:
-        # SVC sin probability=True
-        y_pred_proba = model.decision_function(X_test)
-    return y_pred, y_pred_proba
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--retrain", action="store_true")
+    args = parser.parse_args()
+    log.info("Ejecutar train.py desde main.py para datos completos.")

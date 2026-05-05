@@ -1,20 +1,22 @@
 """
 evaluate.py
-===========
-Cálculo y visualización de métricas:
-  - Precision, Recall, F1-Score (por clase y macro/weighted)
-  - Confusion Matrix  → heatmap PNG
-  - ROC Curve         → curva AUC PNG
-  - Classification Report completo
+───────────
+Cálculo y registro completo de métricas de evaluación:
+  - Precision, Recall, F1-Score (por clase y ponderado)
+  - Confusion Matrix  (con gráfico guardado)
+  - ROC Curve + AUC   (con gráfico guardado)
+  - Classification Report
+  - Log de métricas y artefactos en MLFlow
 """
 
 import os
+import logging
+import yaml
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")          # sin display GUI
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import yaml
+import mlflow
 
 from sklearn.metrics import (
     classification_report,
@@ -28,188 +30,187 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────
 
 def load_config(config_path: str = "config.yaml") -> dict:
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
-# ─────────────────────────────────────────────
-# Métricas escalares
-# ─────────────────────────────────────────────
-
-def compute_metrics(y_test, y_pred, y_pred_proba) -> dict:
+# ── Classification report ─────────────────────────────────────────────────────
+def compute_metrics(y_test, y_pred, y_prob=None) -> dict:
+    """Calcula todas las métricas de clasificación."""
     metrics = {
-        "accuracy":          float(accuracy_score(y_test, y_pred)),
-        "precision_macro":   float(precision_score(y_test, y_pred, average="macro",   zero_division=0)),
-        "precision_weighted":float(precision_score(y_test, y_pred, average="weighted",zero_division=0)),
-        "recall_macro":      float(recall_score(y_test, y_pred, average="macro",      zero_division=0)),
-        "recall_weighted":   float(recall_score(y_test, y_pred, average="weighted",   zero_division=0)),
-        "f1_macro":          float(f1_score(y_test, y_pred, average="macro",          zero_division=0)),
-        "f1_weighted":       float(f1_score(y_test, y_pred, average="weighted",       zero_division=0)),
-        "roc_auc":           float(roc_auc_score(y_test, y_pred_proba)),
+        "accuracy":           accuracy_score(y_test, y_pred),
+        "precision_weighted": precision_score(y_test, y_pred, average="weighted", zero_division=0),
+        "recall_weighted":    recall_score(y_test, y_pred, average="weighted", zero_division=0),
+        "f1_weighted":        f1_score(y_test, y_pred, average="weighted", zero_division=0),
+        "precision_macro":    precision_score(y_test, y_pred, average="macro", zero_division=0),
+        "recall_macro":       recall_score(y_test, y_pred, average="macro", zero_division=0),
+        "f1_macro":           f1_score(y_test, y_pred, average="macro", zero_division=0),
     }
 
-    # Por clase
-    prec_c = precision_score(y_test, y_pred, average=None, zero_division=0)
-    rec_c  = recall_score(y_test, y_pred, average=None, zero_division=0)
-    f1_c   = f1_score(y_test, y_pred, average=None, zero_division=0)
-    classes = ["Benign (B=0)", "Malignant (M=1)"]
-    for i, cls in enumerate(classes):
-        key = cls.split()[0].lower()
-        metrics[f"precision_{key}"] = float(prec_c[i]) if i < len(prec_c) else 0.0
-        metrics[f"recall_{key}"]    = float(rec_c[i])  if i < len(rec_c)  else 0.0
-        metrics[f"f1_{key}"]        = float(f1_c[i])   if i < len(f1_c)   else 0.0
+    if y_prob is not None:
+        try:
+            metrics["roc_auc"] = roc_auc_score(y_test, y_prob)
+        except Exception:
+            pass
+
+    for k, v in metrics.items():
+        log.info("%-30s %.4f", k, v)
 
     return metrics
 
 
-def print_classification_report(y_test, y_pred) -> None:
-    print("\n" + "=" * 60)
-    print("  CLASSIFICATION REPORT")
-    print("=" * 60)
-    report = classification_report(
-        y_test, y_pred,
-        target_names=["Benigno (B)", "Maligno (M)"],
-        digits=4
-    )
-    print(report)
-
-
-# ─────────────────────────────────────────────
-# Confusion Matrix
-# ─────────────────────────────────────────────
-
-def plot_confusion_matrix(y_test, y_pred,
-                          plots_dir: str = "plots") -> str:
-    os.makedirs(plots_dir, exist_ok=True)
-    path = os.path.join(plots_dir, "confusion_matrix.png")
-
+# ── Confusion Matrix ──────────────────────────────────────────────────────────
+def plot_confusion_matrix(y_test, y_pred, plots_dir: str,
+                          run_id: str = "") -> str:
     cm = confusion_matrix(y_test, y_pred)
+    labels = ["Benigno (0)", "Maligno (1)"]
+
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(
         cm, annot=True, fmt="d", cmap="Blues",
-        xticklabels=["Benigno", "Maligno"],
-        yticklabels=["Benigno", "Maligno"],
-        linewidths=0.5, ax=ax
+        xticklabels=labels, yticklabels=labels, ax=ax,
+        linewidths=0.5, linecolor="white",
     )
-    ax.set_title("Matriz de Confusión", fontsize=14, fontweight="bold", pad=12)
+    ax.set_xlabel("Predicción", fontsize=12)
     ax.set_ylabel("Real", fontsize=12)
-    ax.set_xlabel("Predicho", fontsize=12)
+    ax.set_title("Matriz de Confusión", fontsize=13, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"  [PLOT] Confusion Matrix → {path}")
+
+    os.makedirs(plots_dir, exist_ok=True)
+    path = os.path.join(plots_dir, f"confusion_matrix_{run_id}.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Confusion matrix guardada: %s", path)
     return path
 
 
-# ─────────────────────────────────────────────
-# ROC Curve
-# ─────────────────────────────────────────────
+# ── ROC Curve ────────────────────────────────────────────────────────────────
+def plot_roc_curve(y_test, y_prob, plots_dir: str,
+                   run_id: str = "") -> str:
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    roc_auc_val = auc(fpr, tpr)
 
-def plot_roc_curve(y_test, y_pred_proba,
-                   plots_dir: str = "plots") -> str:
-    os.makedirs(plots_dir, exist_ok=True)
-    path = os.path.join(plots_dir, "roc_curve.png")
-
-    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-    roc_auc = auc(fpr, tpr)
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(fpr, tpr, color="#E63946", lw=2,
-            label=f"ROC Curve (AUC = {roc_auc:.4f})")
-    ax.plot([0, 1], [0, 1], color="#A8DADC", lw=1.5, linestyle="--",
-            label="Clasificador aleatorio")
-    ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([0.0, 1.02])
-    ax.set_xlabel("False Positive Rate (FPR)", fontsize=12)
-    ax.set_ylabel("True Positive Rate (TPR)", fontsize=12)
-    ax.set_title("Curva ROC — Detección de Cáncer", fontsize=14,
-                 fontweight="bold")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    ax.plot(fpr, tpr, color="#4C72B0", lw=2,
+            label=f"ROC AUC = {roc_auc_val:.4f}")
+    ax.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+    ax.fill_between(fpr, tpr, alpha=0.08, color="#4C72B0")
+    ax.set_xlim([0, 1])
+    ax.set_ylim([0, 1.02])
+    ax.set_xlabel("Tasa de Falsos Positivos", fontsize=12)
+    ax.set_ylabel("Tasa de Verdaderos Positivos", fontsize=12)
+    ax.set_title("Curva ROC", fontsize=13, fontweight="bold")
     ax.legend(loc="lower right", fontsize=11)
-    ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"  [PLOT] ROC Curve → {path}")
+
+    path = os.path.join(plots_dir, f"roc_curve_{run_id}.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("ROC curve guardada: %s", path)
     return path
 
 
-# ─────────────────────────────────────────────
-# Métricas CV plot
-# ─────────────────────────────────────────────
+# ── Classification report plot ────────────────────────────────────────────────
+def plot_classification_report(y_test, y_pred, plots_dir: str,
+                                run_id: str = "") -> str:
+    report = classification_report(
+        y_test, y_pred,
+        target_names=["Benigno", "Maligno"],
+        output_dict=True,
+    )
+    df_report = pd.DataFrame(report).transpose().round(3)
+    log.info("Classification Report:\n%s", df_report.to_string())
 
-def plot_cv_scores(cv_metrics: dict, plots_dir: str = "plots") -> str:
-    if not cv_metrics:
-        return ""
-    os.makedirs(plots_dir, exist_ok=True)
-    path = os.path.join(plots_dir, "cv_scores.png")
-
-    metrics_to_plot = {
-        k: v for k, v in cv_metrics.items() if k.endswith("_mean")
-    }
-    stds = {
-        k.replace("_mean", "_std"): cv_metrics.get(k.replace("_mean", "_std"), 0)
-        for k in metrics_to_plot
-    }
-
-    labels = [k.replace("cv_", "").replace("_mean", "") for k in metrics_to_plot]
-    means  = list(metrics_to_plot.values())
-    errors = [stds.get(k.replace("_mean", "_std"), 0) for k in metrics_to_plot]
-
-    x = np.arange(len(labels))
-    colors = ["#1D3557", "#457B9D", "#A8DADC", "#E63946", "#F4A261"]
-
-    fig, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.bar(x, means, yerr=errors, color=colors[:len(labels)],
-                  capsize=5, alpha=0.9, edgecolor="white", linewidth=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right")
-    ax.set_ylim(0, 1.1)
-    ax.set_ylabel("Score")
-    ax.set_title("Cross-Validation Scores (mean ± std)", fontsize=13,
-                 fontweight="bold")
-    ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.4)
-    for bar, val in zip(bars, means):
-        ax.text(bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.02,
-                f"{val:.3f}", ha="center", va="bottom", fontsize=9)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.axis("off")
+    table = ax.table(
+        cellText=df_report.values,
+        colLabels=df_report.columns,
+        rowLabels=df_report.index,
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    ax.set_title("Classification Report", fontsize=13,
+                 fontweight="bold", pad=20)
     plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"  [PLOT] CV Scores → {path}")
+
+    path = os.path.join(plots_dir, f"classification_report_{run_id}.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Classification report guardado: %s", path)
     return path
 
 
-# ─────────────────────────────────────────────
-# Punto de entrada
-# ─────────────────────────────────────────────
-
-def evaluate(y_test, y_pred, y_pred_proba,
-             cv_metrics: dict,
-             config_path: str = "config.yaml"):
+# ── Pipeline de evaluación ────────────────────────────────────────────────────
+def run(model, X_test, y_test, run_id: str = "",
+        config_path: str = "config.yaml") -> dict:
     """
-    Ejecuta evaluación completa y retorna:
-        metrics (dict), cm_path, roc_path, cv_path
+    Evalúa el modelo, genera gráficos y los registra en MLFlow.
+    Retorna diccionario con todas las métricas.
     """
-    cfg = load_config(config_path)
-    plots_dir = cfg["output"]["plots_dir"]
+    cfg       = load_config(config_path)
+    plots_dir = cfg["paths"]["plots_dir"]
 
-    print_classification_report(y_test, y_pred)
+    log.info("═" * 55)
+    log.info("EVALUACIÓN DEL MODELO")
 
-    metrics = compute_metrics(y_test, y_pred, y_pred_proba)
+    # Predicciones
+    y_pred = model.predict(X_test)
+    y_prob = None
+    if hasattr(model, "predict_proba"):
+        y_prob = model.predict_proba(X_test)[:, 1]
+    elif hasattr(model, "decision_function"):
+        y_prob = model.decision_function(X_test)
 
-    print("\n[METRICS] Resumen:")
-    for k, v in metrics.items():
-        print(f"  {k:<30} {v:.4f}")
+    # Métricas numéricas
+    metrics = compute_metrics(y_test, y_pred, y_prob)
 
-    # Gráficas
-    cm_path  = plot_confusion_matrix(y_test, y_pred, plots_dir)
-    roc_path = plot_roc_curve(y_test, y_pred_proba, plots_dir)
-    cv_path  = plot_cv_scores(cv_metrics, plots_dir)
+    # Gráficos
+    cm_path     = plot_confusion_matrix(y_test, y_pred, plots_dir, run_id)
+    roc_path    = None
+    report_path = plot_classification_report(y_test, y_pred, plots_dir, run_id)
 
-    return metrics, cm_path, roc_path, cv_path
+    if y_prob is not None:
+        roc_path = plot_roc_curve(y_test, y_prob, plots_dir, run_id)
+
+    # ── Log en MLFlow ────────────────────────────────────────────────────────
+    # Se asume que hay un run activo (iniciado desde pipeline.py)
+    try:
+        active_run = mlflow.active_run()
+        if active_run is None:
+            mlflow_cfg = cfg["mlflow"]
+            mlflow.set_tracking_uri(mlflow_cfg["tracking_uri"])
+            mlflow.set_experiment(mlflow_cfg["experiment_name"])
+            ctx = mlflow.start_run(run_id=run_id or None,
+                                   run_name=mlflow_cfg["run_name"])
+        else:
+            ctx = None
+
+        mlflow.log_metrics({f"test_{k}": v for k, v in metrics.items()})
+        mlflow.log_artifact(cm_path,     artifact_path="plots")
+        mlflow.log_artifact(report_path, artifact_path="plots")
+        if roc_path:
+            mlflow.log_artifact(roc_path, artifact_path="plots")
+
+        log.info("Métricas y artefactos registrados en MLFlow.")
+
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
+
+    except Exception as e:
+        log.warning("No se pudo conectar a MLFlow: %s", e)
+
+    metrics["plots"] = {
+        "confusion_matrix": cm_path,
+        "roc_curve": roc_path,
+        "classification_report": report_path,
+    }
+    log.info("═" * 55)
+    return metrics
