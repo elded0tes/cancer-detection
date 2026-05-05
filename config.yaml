@@ -1,0 +1,57 @@
+# ============================================================
+#  Cancer Detection Pipeline — Configuration
+# ============================================================
+
+dataset:
+  # Wisconsin Breast Cancer Dataset
+  # ucimlrepo IDs:  17 = Diagnostic | 15 = Original | 16 = Prognostic
+  source: "ucimlrepo"           # "ucimlrepo" | "sklearn" | "csv"
+  uci_id: 17                    # 17 = Wisconsin Diagnostic (WDBC)
+  target_column: "diagnosis"    # Malignant (M) / Benign (B)
+  csv_path: "data/raw_data.csv" # Used only when source = "csv"
+  test_size: 0.20
+  random_state: 42
+
+preprocessing:
+  remove_nulls: true
+  remove_duplicates: true
+  drop_columns:                 # Columns to drop (id, unnamed, etc.)
+    - "id"
+    - "Unnamed: 32"
+  normalization: "standard"     # "standard" | "minmax" | "none"
+  encode_target: true           # M -> 1, B -> 0
+
+model:
+  algorithm: "random_forest"    # "random_forest" | "svm" | "logistic_regression"
+  retrain: true                 # false = load existing model from models/
+  saved_model_path: "models/cancer_model.pkl"
+  cross_validation:
+    enabled: true
+    folds: 5
+    scoring: "f1"
+  hyperparameters:
+    random_forest:
+      n_estimators: 200
+      max_depth: 10
+      min_samples_split: 4
+      random_state: 42
+    svm:
+      C: 1.0
+      kernel: "rbf"
+      random_state: 42
+    logistic_regression:
+      C: 1.0
+      max_iter: 1000
+      random_state: 42
+
+mlflow:
+  experiment_name: "cancer_detection_wisconsin"
+  tracking_uri: "http://127.0.0.1:5000"   # mlflow ui --port 5000
+  run_name_prefix: "run"
+  log_model: true
+  register_model: false
+  registered_model_name: "cancer_detector"
+
+output:
+  plots_dir: "plots"
+  models_dir: "models"
