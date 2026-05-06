@@ -1,0 +1,14 @@
+aliases: []
+creation_timestamp: 1778099485824
+current_stage: None
+description: ''
+last_updated_timestamp: 1778099485824
+name: CancerDetectionModel
+run_id: 364333dc85a74fc3adbd866e592c660c
+run_link: ''
+source: mlflow-artifacts:/405366518408622963/364333dc85a74fc3adbd866e592c660c/artifacts/model
+status: READY
+status_message: null
+storage_location: mlflow-artifacts:/405366518408622963/364333dc85a74fc3adbd866e592c660c/artifacts/model
+user_id: null
+version: 1

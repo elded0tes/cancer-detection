@@ -10,7 +10,7 @@ mlflow:
   artifact_path: model
   experiment_name: cancer-detection
   run_name: wisconsin-rf
-  tracking_uri: http://127.0.0.1:5001
+  tracking_uri: sqlite:///mlflow.db
 model:
   cross_val_folds: 5
   name: RandomForest

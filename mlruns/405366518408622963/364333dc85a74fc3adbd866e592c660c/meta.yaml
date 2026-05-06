@@ -1,0 +1,15 @@
+artifact_uri: mlflow-artifacts:/405366518408622963/364333dc85a74fc3adbd866e592c660c/artifacts
+end_time: 1778099485826
+entry_point_name: ''
+experiment_id: '405366518408622963'
+lifecycle_stage: active
+run_id: 364333dc85a74fc3adbd866e592c660c
+run_name: wisconsin-rf
+run_uuid: 364333dc85a74fc3adbd866e592c660c
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1778099482495
+status: 3
+tags: []
+user_id: erickdiazn

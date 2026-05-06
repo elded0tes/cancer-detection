@@ -1,0 +1,6 @@
+artifact_location: mlflow-artifacts:/405366518408622963
+creation_time: 1778099482430
+experiment_id: '405366518408622963'
+last_update_time: 1778099482430
+lifecycle_stage: active
+name: cancer-detection

@@ -1,0 +1,13 @@
+data:
+  source: sklearn
+  test_size: 0.2
+mlflow:
+  experiment_name: cancer-detection
+  tracking_uri: http://127.0.0.1:5001
+model:
+  cross_val_folds: 5
+  name: RandomForest
+  params:
+    max_depth: 8
+    n_estimators: 200
+  retrain: true
