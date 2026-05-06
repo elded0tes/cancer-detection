@@ -61,8 +61,8 @@ pip install -r requirements.txt
 ### 3. Iniciar MLFlow UI (en otra terminal)
 
 ```bash
-mlflow ui --port 5000
-# Abre: http://127.0.0.1:5000
+mlflow ui --port 5001
+# Abre: http://127.0.0.1:5001
 ```
 
 ### 4. Ejecutar el pipeline completo
@@ -153,7 +153,7 @@ model:
     max_depth: 8
 
 mlflow:
-  tracking_uri: "http://127.0.0.1:5000"
+  tracking_uri: "http://127.0.0.1:5001"
   experiment_name: "cancer-detection"
 ```
 
@@ -173,7 +173,7 @@ y están disponibles 30 días.
 
 ## MLFlow
 
-Abre la UI en `http://127.0.0.1:5000` para ver:
+Abre la UI en `http://127.0.0.1:5001` para ver:
 - **Experimentos** con todas las ejecuciones
 - **Parámetros** del modelo y preprocesamiento
 - **Métricas** de CV (por fold y promedio) y de test
